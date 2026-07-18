@@ -29,6 +29,14 @@
 ### 招聘 API（入站发现）
 方向A 入站招聘发现接入 **Adzuna**（免费注册 https://developer.adzuna.com/）。填入 `ADZUNA_APP_ID` / `ADZUNA_APP_KEY` 后拉取真实招聘职位；无 Key 时使用模拟招聘信号引擎，演示模式完整可跑。
 
+### 监控配置中心（/settings）· 可动态增删监控源与关键词
+监控引擎**完全由配置驱动**，无需改代码即可扩展监控范围：
+- **搜索网站（出站动态来源）**：默认启用 DuckDuckGo / Wikipedia；可启用内置 Brave/Serp/Tavily（填对应 Key），或添加**自定义站点**（填 URL 模板，支持 `{{query}}` 占位符），按权重遍历抓取。
+- **监控网站（招聘站点 · 入站来源）**：默认 Indeed / LinkedIn / Workopolis / Eluta；可增删任意招聘板，入站扫描对每个站点生成 `site:<host>` 真实搜索并抽取公司名。
+- **招聘关键词（入站）**：可增删招聘监控查询词，与监控网站组合生成真实搜索。
+- **信号分类关键词（出站识别）**：可增删任意拓业主题（如 ESG/碳中和、出口关税），用逗号或 `|` 分隔匹配词，出站扫描据此把网页文本归类为信号类型。
+- **持久化**：Vercel 绑 KV 时存云端；未绑 KV 时存本地 `data/config.json`（重启保留）；均可一键「重置默认」。
+
 ## 第四阶段 · 四大模块
 
 1. **AI 获客流水线** — 全网爬取 → 锁定安省/美中线索 → 提取 Plant Manager → 千人千面冷邮件 → 1.5h 地面拜访签单。仪表盘「一键运行流水线」自动串起扫描→生成→投递→派发。
@@ -84,7 +92,9 @@ vercel --prod
 | POST | `/api/reset` | 重置为初始种子 |
 | GET | `/api/db/customers` | 客户数据库（region/tier/segment/signal/status/q 过滤） |
 | PATCH | `/api/db/customers/[id]` | 推进客户状态 |
-| GET | `/api/db/partners` | 渠道商列表 |
+| GET | `/api/db/channels` | 渠道商列表 |
+| GET | `/api/db/sis` | SI 列表 |
+| GET/POST/PATCH/DELETE | `/api/config` | 监控配置（搜索网站/监控网站/招聘关键词/信号关键词）增删改查与重置 |
 | GET | `/api/db/stats` | 数据库聚合统计（安省占比 / 信号分布 / 管道价值） |
 | GET | `/api/db/export?format=csv\|xlsx` | 导出客户数据库 |
 
