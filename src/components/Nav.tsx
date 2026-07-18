@@ -9,6 +9,7 @@ const links = [
   { href: "/recruitment", label: "招聘监控" },
   { href: "/email", label: "冷邮件" },
   { href: "/visits", label: "地面拜访" },
+  { href: "/database", label: "客户数据库" },
 ];
 
 export default function Nav() {
