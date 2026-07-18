@@ -11,6 +11,7 @@ const links = [
   { href: "/visits", label: "地面拜访" },
   { href: "/database", label: "数据库" },
   { href: "/monitor", label: "监控中心" },
+  { href: "/settings", label: "配置" },
 ];
 
 export default function Nav() {

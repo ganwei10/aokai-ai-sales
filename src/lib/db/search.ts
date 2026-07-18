@@ -288,3 +288,89 @@ function syntheticJobs(query: string): JobPosting[] {
   }
   return out;
 }
+
+// ---------- 可配置站点搜索（出站动态，按配置遍历搜索网站）----------
+import { getConfig } from "./config";
+
+// 自定义站点通用解析：抓取页面中的外链标题，过滤出与查询词相关的少量结果
+async function customSearch(urlTemplate: string, query: string): Promise<SearchResult[]> {
+  const url = urlTemplate.replace("{{query}}", encodeURIComponent(query)).replace("{{name}}", encodeURIComponent(query));
+  try {
+    const r = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+        Accept: "text/html",
+      },
+    });
+    const html = await r.text();
+    const out: SearchResult[] = [];
+    const re = /<a[^>]+href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html)) !== null && out.length < 6) {
+      const href = m[1];
+      const title = decodeEntities(stripTags(m[2])).trim();
+      if (title.length < 4) continue;
+      if (/google|bing|duckduckgo|wikipedia|linkedin|indeed/i.test(href) && !/news|blog|article|press/i.test(href)) continue;
+      out.push({ title, snippet: title, url: href, source: "自定义站点" });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+// 按配置中的启用搜索站点，遍历抓取并合并去重
+// name：公司名；extra：附加查询词（如 "expansion OR hiring ..."）
+export async function searchViaSites(name: string, extra = ""): Promise<SearchResult[]> {
+  const cfg = await getConfig();
+  const sites = cfg.searchSites
+    .filter((s) => s.enabled)
+    .sort((a, b) => a.weight - b.weight);
+  const out: SearchResult[] = [];
+  const seen = new Set<string>();
+  const q = `"${name}" ${extra}`.trim();
+  for (const site of sites) {
+    let res: SearchResult[] = [];
+    if (site.engine === "duckduckgo") res = await duckduckgo(q);
+    else if (site.engine === "wikipedia") res = await wikipedia(name);
+    else if (site.engine === "brave") res = KEY ? await brave(q) : [];
+    else if (site.engine === "serp") res = KEY ? await serp(q) : [];
+    else if (site.engine === "tavily") res = KEY ? await tavily(q) : [];
+    else if (site.engine === "custom" && site.urlTemplate) res = await customSearch(site.urlTemplate, q);
+    for (const r of res) {
+      if (seen.has(r.url)) continue;
+      seen.add(r.url);
+      out.push({ ...r, source: r.source || site.name });
+    }
+    if (out.length >= 10) break;
+  }
+  return out.slice(0, 12);
+}
+
+// ---------- 从招聘搜索结果中启发式抽取公司名 ----------
+const SITE_NOISE = /(indeed|linkedin|glassdoor|workopolis|eluta|monster|ziprecruiter|careerbuilder|simplyhired|google|bing|duckduckgo)/i;
+export function extractCompanyFromResult(r: SearchResult): string | null {
+  const t = (r.title || "").trim();
+  // "包装工 - 公司名 | Indeed" 模式
+  const m1 = t.match(/\s[-–]\s+(.+?)(?:\s[|｜]\s.*)?$/);
+  if (m1) {
+    const cand = cleanCompany(m1[1]);
+    if (cand) return cand;
+  }
+  // "Company is hiring ..." 模式
+  const m2 = t.match(/^([A-Z][\w&.'-]+(?:\s+[A-Z][\w&.'-]+){0,3})\s+is\s+hiring/i);
+  if (m2) return cleanCompany(m2[1]);
+  // "... at Company" 模式
+  const m3 = t.match(/\bat\s+([A-Z][\w&.'-]+(?:\s+[A-Z][\w&.'-]+){0,3})/);
+  if (m3) return cleanCompany(m3[1]);
+  // snippet 中 "Company is hiring"
+  const m4 = (r.snippet || "").match(/([A-Z][\w&.'-]+(?:\s+[A-Z][\w&.'-]+){0,3})\s+is\s+hiring/i);
+  if (m4) return cleanCompany(m4[1]);
+  return null;
+}
+function cleanCompany(s: string): string | null {
+  let v = s.replace(/[|｜].*$/, "").trim();
+  if (!v || SITE_NOISE.test(v)) return null;
+  if (v.length > 60) return null;
+  return v;
+}

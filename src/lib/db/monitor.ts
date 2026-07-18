@@ -1,8 +1,9 @@
-// 双向监控引擎
-// 方向A 入站（招聘发现）：扫招聘职位 → 抽取公司名 → 库中已有则标「招聘缺工」信号，库中没有则进「待评估」池
-// 方向B 出站（全网动态）：对库内每家公司全网扫描 → 收集任何利于拓业的动态信号（产能/融资/并购/管理层…）
+// 双向监控引擎（配置驱动版）
+// 方向A 入站（招聘发现）：按配置遍历「招聘关键词 × 监控网站」真实搜索 → 抽取公司名 → 库内标「招聘缺工」、库外进待评估池
+// 方向B 出站（全网动态）：按配置遍历「搜索网站」对每家公司全网扫描 → 按「信号分类关键词」产出拓业信号
 import { getDb, addSignal, addDiscovered, addRun, getCustomer } from "./store";
-import { webSearch, recruitmentSearch, searchMode, liveEngineLabel, type SearchResult, type JobPosting } from "./search";
+import { webSearch, searchViaSites, searchMode, liveEngineLabel, extractCompanyFromResult, type SearchResult } from "./search";
+import { getConfig, type MonitorConfig, type SignalKeyword } from "./config";
 import type {
   ChannelPartner,
   Customer,
@@ -11,7 +12,6 @@ import type {
   MonitorRun,
   Signal,
   SignalSentiment,
-  SignalType,
   SystemIntegrator,
 } from "./types";
 
@@ -31,10 +31,6 @@ function seededRng(seedStr: string) {
 }
 const rid = () => "S-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
-function ADZUNA_SOURCE(): string {
-  return process.env.ADZUNA_APP_ID && process.env.ADZUNA_APP_KEY ? "Adzuna(Live)" : "合成招聘数据(演示)";
-}
-
 function norm(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 18);
 }
@@ -44,21 +40,18 @@ function exists(entityType: EntityType, entityId: string, title: string): boolea
   return getDb().signals.some((s) => s.entityType === entityType && s.entityId === entityId && s.title === title);
 }
 
-// ---------------- 方向A：入站招聘发现 ----------------
-const RECRUIT_QUERIES = [
-  "packaging line operator meat processing plant Ontario Canada",
-  "food production supervisor poultry processor hiring",
-  "meat packing plant hiring multiple shifts Midwest",
-  "automation technician protein processing facility",
-];
-
+// ---------------- 方向A：入站招聘发现（配置驱动）----------------
 export async function runInboundScan(): Promise<{ run: MonitorRun; discovered: DiscoveredCompany[]; matched: number }> {
+  const cfg = await getConfig();
+  const kws = cfg.recruitKeywords.filter((k) => k.enabled);
+  const sites = cfg.watchSites.filter((s) => s.enabled).sort((a, b) => a.weight - b.weight);
+
   const runId = rid();
   const started = new Date().toISOString();
   const run: MonitorRun = {
     id: runId,
     direction: "inbound",
-    source: ADZUNA_SOURCE(),
+    source: sites.map((s) => s.name).join("/") || "无启用监控网站",
     startedAt: started,
     status: "running",
     scanned: 0,
@@ -72,84 +65,88 @@ export async function runInboundScan(): Promise<{ run: MonitorRun; discovered: D
   let scanned = 0;
   let matched = 0;
   const newDiscovered: DiscoveredCompany[] = [];
-
-  // 为了让演示同时展现「命中已有客户」与「发现新公司」两条路径，
-  // 将一小部分招聘公司名替换为库内真实客户名。
   const customers = db.customers;
+  let injected = false;
 
-  for (const q of RECRUIT_QUERIES) {
-    const jobs: JobPosting[] = await recruitmentSearch(q);
-    scanned += jobs.length;
-    // 注入 1 条命中的库内客户（仅首轮）
-    if (q === RECRUIT_QUERIES[0] && customers.length) {
-      const c = customers[Math.floor(seededRng(q)() * customers.length)];
-      jobs.unshift({
-        company: c.company,
-        title: "Packaging Line Operator",
-        location: `${c.city}, ${c.province}`,
-        snippet: `${c.company} is hiring packaging line operators across multiple shifts.`,
-        url: "https://example.com/jobs/injected",
-      });
-    }
-    for (const job of jobs) {
-      const existing = db.customers.find((c) => norm(c.company) === norm(job.company));
-      if (existing) {
-        if (!exists("customer", existing.id, "招聘缺工：" + job.title)) {
-          addSignal({
-            id: rid(),
-            entityType: "customer",
-            entityId: existing.id,
-            entityName: existing.company,
-            type: "招聘缺工",
-            title: `招聘缺工：${job.title}`,
-            summary: job.snippet,
-            url: job.url,
-            source: "招聘监控(入站)",
-            date: new Date().toISOString().slice(0, 10),
-            sentiment: "positive",
-            businessRelevance: "后道/前道用工紧张，正是 AK 自动化方案切入窗口；建议优先触达。",
-            region: existing.region,
-          });
-          run.newSignals++;
-        }
-        matched++;
-        continue;
+  for (const kw of kws) {
+    for (const site of sites) {
+      const q = `site:${site.host} ${kw.query}`;
+      const results: SearchResult[] = await webSearch(q);
+      scanned += results.length;
+
+      // 首轮注入 1 条命中的库内客户，确保演示同时展现「命中库内」与「发现新公司」两条路径
+      if (!injected && customers.length) {
+        injected = true;
+        const c = customers[Math.floor(seededRng(q)() * customers.length)];
+        results.unshift({
+          title: `${c.company} is hiring Packaging Line Operator`,
+          snippet: `${c.company} is hiring packaging line operators across multiple shifts.`,
+          url: "https://example.com/jobs/injected",
+          source: "招聘监控(入站)",
+        });
       }
-      // 库内无 → 进待评估池（去重）
-      if (db.discovered.some((d) => norm(d.company) === norm(job.company))) continue;
-      const d: DiscoveredCompany = {
-        id: "D-" + (db.discovered.length + 1).toString().padStart(3, "0") + "x" + Math.random().toString(36).slice(2, 5),
-        company: job.company,
-        city: job.location.split(",")[0] || null,
-        province: job.location.split(",")[1]?.trim() || null,
-        region: /ontario|canada/i.test(job.location) ? "安省" : /midwest|us|il|wi|mi|oh|in|ia|mn|ne|sd/i.test(job.location) ? "美中" : null,
-        source: "recruitment",
-        discoveredAt: new Date().toISOString().slice(0, 10),
-        query: q,
-        snippet: job.snippet,
-        employees: null,
-        segment: null,
-        status: "new",
-      };
-      addDiscovered(d);
-      addSignal({
-        id: rid(),
-        entityType: "discovered",
-        entityId: d.id,
-        entityName: d.company,
-        type: "招聘缺工",
-        title: `招聘发现：${job.title}`,
-        summary: job.snippet,
-        url: job.url,
-        source: "招聘监控(入站)",
-        date: d.discoveredAt,
-        sentiment: "positive",
-        businessRelevance: "招聘活跃，疑似扩张/缺工，有待评估是否纳入客户池。",
-        region: d.region ?? undefined,
-      });
-      newDiscovered.push(d);
-      run.newDiscovered++;
-      run.newSignals++;
+
+      for (const r of results) {
+        const company = extractCompanyFromResult(r) || r.title.split(/[-|]/)[0].trim();
+        if (!company) continue;
+        const existing = db.customers.find((c) => norm(c.company) === norm(company));
+        if (existing) {
+          if (!exists("customer", existing.id, "招聘缺工：" + (r.title || company))) {
+            addSignal({
+              id: rid(),
+              entityType: "customer",
+              entityId: existing.id,
+              entityName: existing.company,
+              type: "招聘缺工",
+              title: `招聘缺工：${company}`,
+              summary: r.snippet,
+              url: r.url,
+              source: `${site.name}(入站)`,
+              date: new Date().toISOString().slice(0, 10),
+              sentiment: "positive",
+              businessRelevance: "后道/前道用工紧张，正是 AK 自动化方案切入窗口；建议优先触达。",
+              region: existing.region,
+            });
+            run.newSignals++;
+          }
+          matched++;
+          continue;
+        }
+        // 库内无 → 进待评估池（去重）
+        if (db.discovered.some((d) => norm(d.company) === norm(company))) continue;
+        const d: DiscoveredCompany = {
+          id: "D-" + (db.discovered.length + 1).toString().padStart(3, "0") + "x" + Math.random().toString(36).slice(2, 5),
+          company,
+          city: null,
+          province: null,
+          region: null,
+          source: "recruitment",
+          discoveredAt: new Date().toISOString().slice(0, 10),
+          query: q,
+          snippet: r.snippet,
+          employees: null,
+          segment: null,
+          status: "new",
+        };
+        addDiscovered(d);
+        addSignal({
+          id: rid(),
+          entityType: "discovered",
+          entityId: d.id,
+          entityName: d.company,
+          type: "招聘缺工",
+          title: `招聘发现：${company}`,
+          summary: r.snippet,
+          url: r.url,
+          source: `${site.name}(入站)`,
+          date: d.discoveredAt,
+          sentiment: "positive",
+          businessRelevance: "招聘活跃，疑似扩张/缺工，有待评估是否纳入客户池。",
+        });
+        newDiscovered.push(d);
+        run.newDiscovered++;
+        run.newSignals++;
+      }
     }
   }
 
@@ -160,50 +157,43 @@ export async function runInboundScan(): Promise<{ run: MonitorRun; discovered: D
   return { run, discovered: newDiscovered, matched };
 }
 
-// ---------------- 方向B：出站全网动态 ----------------
-const OUTBOUND_TYPES: { type: SignalType; sentiment: SignalSentiment; relevance: string; kw: RegExp }[] = [
-  { type: "产能扩张", sentiment: "positive", relevance: "扩产带来新线/后道自动化需求，优先跟进产能规划负责人。", kw: /expand|capacity|new (line|plant|facility)|add .* shift/i },
-  { type: "招聘扩张", sentiment: "positive", relevance: "大批量招工印证产能/产线扩张，自动化替代需求强。", kw: /hir|recruit|add .* jobs|staffing/i },
-  { type: "新产线/新品", sentiment: "positive", relevance: "新产线/新品上线需配套包装与检测自动化。", kw: /new product|launch|rollout|line/i },
-  { type: "融资/投资", sentiment: "positive", relevance: "获融资后资本开支意愿强，是设备采购窗口期。", kw: /fund|financ|invest|series |raise|capital/i },
-  { type: "并购", sentiment: "positive", relevance: "并购后产能整合，存在整线标准化与自动化机会。", kw: /acqui|merger|consolidat/i },
-  { type: "关厂/减产", sentiment: "negative", relevance: "减产/关厂短期抑制需求，但可能催生产线整合与改造。", kw: /clos|shut|cut|layoff|slowdown|reduc/i },
-  { type: "管理层变动", sentiment: "neutral", relevance: "新管理层常带来设备更新与效率改造议程，可重新触达。", kw: /appoint|name .* (ceo|vp|president)|leadership|hire .* (ceo|coo)/i },
-  { type: "认证/合规", sentiment: "positive", relevance: "认证/合规升级推动可追溯与自动化改造需求。", kw: /certif|sqf|cfia|fsma|audit|complian/i },
-  { type: "奖项/新闻", sentiment: "positive", relevance: "品牌向好、曝光增加，可作为破冰切入话题。", kw: /award|recogni|ranked|featured/i },
-  { type: "负面事件", sentiment: "negative", relevance: "召回/违规/罢工等负面，短期谨慎，长线看自动化降风险机会。", kw: /recall|violation|lawsuit|strike|outbreak|contaminat/i },
-];
-
-function classify(text: string): typeof OUTBOUND_TYPES[number] | null {
-  for (const t of OUTBOUND_TYPES) if (t.kw.test(text)) return t;
+// ---------------- 方向B：出站全网动态（配置驱动）----------------
+// 按配置的信号分类关键词把文本分类为信号类型
+function classifyFromConfig(text: string, cfg: MonitorConfig): SignalKeyword | null {
+  for (const k of cfg.signalKeywords) {
+    if (!k.enabled || !k.patterns.length) continue;
+    try {
+      if (new RegExp(k.patterns.join("|"), "i").test(text)) return k;
+    } catch {
+      /* 用户填写的正则无效，跳过该条 */
+    }
+  }
   return null;
 }
 
-async function scanEntity(type: EntityType, id: string, name: string, region?: string) {
-  // 始终发起真实联网搜索（无 key 时自动走 DuckDuckGo 真实搜索；失败才回退合成）
-  const results: SearchResult[] = await webSearch(
-    `"${name}" meat processing OR poultry OR pork OR beef expansion OR hiring OR investment OR acquisition OR automation OR plant`
+async function scanEntity(type: EntityType, id: string, name: string, region: string | undefined, cfg: MonitorConfig) {
+  // 始终发起真实联网搜索（按配置的搜索站点遍历；失败才回退合成）
+  const results: SearchResult[] = await searchViaSites(
+    name,
+    "meat processing OR poultry OR pork OR beef expansion OR hiring OR investment OR acquisition OR automation OR plant"
   );
   let added = 0;
-  const firstWord = name.toLowerCase().split(/\s+/)[0];
+  // 仅在搜索结果确实提及「完整公司名」时才生成信号，避免把泛化行业新闻误归因到合成公司名
+  const normName = name.toLowerCase().replace(/[^a-z0-9]/g, "");
   for (const r of results) {
     if (added >= 3) break; // 每实体最多 3 条真实信号，避免噪声
+    const normText = (r.title + " " + r.snippet).toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (normName && !normText.includes(normName)) continue;
     const text = (r.title + " " + r.snippet).toLowerCase();
-    let pick = classify(text);
+    let pick = classifyFromConfig(text, cfg);
     if (!pick) {
-      // 真实结果未命中关键词，但提及该公司（或明显业务词）→ 记为「全网动态」供人工研判
-      const biz = /expansion|hire|hiring|recruit|invest|acqui|automation|plant|production|certif|recall|layoff|new line|capacity|financ/i;
-      if (text.includes(firstWord) || biz.test(text)) {
-        pick = { type: "全网动态", sentiment: "neutral", relevance: "公开网络出现与该公司相关的动态，建议人工研判是否利于拓业。", kw: /./ };
-      } else {
-        continue;
-      }
+      pick = { id: "fallback", label: "全网动态", sentiment: "neutral", relevance: "公开网络出现与该公司相关的动态，建议人工研判是否利于拓业。", patterns: [], enabled: true };
     }
-    const title = `${name}：${pick.type}`;
+    const title = `${name}：${pick.label}`;
     if (exists(type, id, title)) continue;
     addSignal({
       id: rid(), entityType: type, entityId: id, entityName: name,
-      type: pick.type, title, summary: r.snippet || r.title,
+      type: pick.label as Signal["type"], title, summary: r.snippet || r.title,
       url: r.url, source: r.source || liveEngineLabel(), date: r.date || new Date().toISOString().slice(0, 10),
       sentiment: pick.sentiment, businessRelevance: pick.relevance, region: region as any,
     });
@@ -216,10 +206,12 @@ export async function runOutboundScan(
   entityId?: string,
   limit = 60
 ): Promise<{ run: MonitorRun; signals: number }> {
+  const cfg = await getConfig();
   const started = new Date().toISOString();
+  const srcLabel = cfg.searchSites.filter((s) => s.enabled).map((s) => s.name).join("/") || liveEngineLabel();
   const run: MonitorRun = {
     id: rid(), direction: "outbound",
-    source: liveEngineLabel(),
+    source: srcLabel,
     startedAt: started, status: "running", scanned: 0, found: 0, newSignals: 0, newDiscovered: 0,
   };
   addRun(run);
@@ -250,7 +242,7 @@ export async function runOutboundScan(
   let added = 0;
   for (const t of capped) {
     const before = db.signals.length;
-    await scanEntity(t.type, t.id, t.name, t.region);
+    await scanEntity(t.type, t.id, t.name, t.region, cfg);
     const delta = db.signals.length - before;
     if (delta > 0) {
       added += delta;
