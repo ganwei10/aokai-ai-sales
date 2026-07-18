@@ -16,7 +16,18 @@
 - **方向A 入站（招聘发现）**：扫招聘网站职位 → 抽取公司名 → 库内已有则标「招聘缺工」信号，库内没有则进**待评估池（DiscoveredCompany）**待评估入池。
 - **方向B 出站（全网动态）**：对库内每家公司全网扫描，收集**任何有利于拓业的动态**——产能扩张、招聘扩张、新产线/新品、融资/投资、并购、关厂/减产、管理层变动、认证/合规、奖项/新闻、负面事件——统一沉淀为「动态信号」时间线。
 - 所有信号可过滤（实体/类型/情绪），并可一键导出 CSV / Excel。
-- 数据源：`WEB_SEARCH_API_KEY`（Brave/Serp/Tavily，由 `WEB_SEARCH_ENGINE` 选择）+ `ADZUNA_APP_ID/KEY`（招聘）；无 Key 时回退确定性合成数据，演示模式完整可跑。
+- 数据源：`WEB_SEARCH_API_KEY`（Brave/Serp/Tavily，由 `WEB_SEARCH_ENGINE` 选择）+ `ADZUNA_APP_ID/KEY`（招聘）；**默认无 Key 即走真实联网搜索（DuckDuckGo HTML 抓取 → 自动回退 DDG 速答 API → Wikipedia），可直接产出真实信号**，无需任何 Key。
+
+### 真实联网搜索（无需 Key 即可跑真实信号）
+出站扫描默认使用 **DuckDuckGo 免 Key 真实搜索**：先抓 HTML 结果，遇 bot 限流时自动回退 DDG 官方速答 API 与 Wikipedia 搜索 API，三级回退均为真实数据源，返回带真实 URL 的信号。验证示例（真实公司）：
+- `Maple Leaf Foods` → Wikipedia 实体页（DuckDuckGo 速答）
+- `Sofina Foods` → 官网 about-us、Indeed 公司页、招聘页（DuckDuckGo HTML），含「招聘扩张」信号
+- `Cargill Protein` → Cargill 北美蛋白业务页（DuckDuckGo HTML）
+
+> 注：种子库中的 300 家客户为演示用**合成公司名**（如 "Ferreira Meats Foods Ltd."），真实搜索引擎查无此公司，出站扫描对它们返回 0 属正常。要看真实信号，请在「监控中心」用**添加真实监测公司**输入框加入真实公司名（如 Maple Leaf Foods / Olymel / 双汇 / 雨润），再跑「方向B」。
+
+### 招聘 API（入站发现）
+方向A 入站招聘发现接入 **Adzuna**（免费注册 https://developer.adzuna.com/）。填入 `ADZUNA_APP_ID` / `ADZUNA_APP_KEY` 后拉取真实招聘职位；无 Key 时使用模拟招聘信号引擎，演示模式完整可跑。
 
 ## 第四阶段 · 四大模块
 

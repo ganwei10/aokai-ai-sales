@@ -2,7 +2,7 @@
 // 方向A 入站（招聘发现）：扫招聘职位 → 抽取公司名 → 库中已有则标「招聘缺工」信号，库中没有则进「待评估」池
 // 方向B 出站（全网动态）：对库内每家公司全网扫描 → 收集任何利于拓业的动态信号（产能/融资/并购/管理层…）
 import { getDb, addSignal, addDiscovered, addRun, getCustomer } from "./store";
-import { webSearch, recruitmentSearch, searchMode, type SearchResult, type JobPosting } from "./search";
+import { webSearch, recruitmentSearch, searchMode, liveEngineLabel, type SearchResult, type JobPosting } from "./search";
 import type {
   ChannelPartner,
   Customer,
@@ -31,6 +31,10 @@ function seededRng(seedStr: string) {
 }
 const rid = () => "S-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
+function ADZUNA_SOURCE(): string {
+  return process.env.ADZUNA_APP_ID && process.env.ADZUNA_APP_KEY ? "Adzuna(Live)" : "合成招聘数据(演示)";
+}
+
 function norm(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 18);
 }
@@ -54,7 +58,7 @@ export async function runInboundScan(): Promise<{ run: MonitorRun; discovered: D
   const run: MonitorRun = {
     id: runId,
     direction: "inbound",
-    source: searchMode() === "live" ? "Adzuna/招聘站" : "合成招聘数据(演示)",
+    source: ADZUNA_SOURCE(),
     startedAt: started,
     status: "running",
     scanned: 0,
@@ -175,57 +179,47 @@ function classify(text: string): typeof OUTBOUND_TYPES[number] | null {
   return null;
 }
 
-function syntheticSignalsFor(name: string, region?: string): Omit<Signal, "id" | "entityType" | "entityId" | "entityName" | "region">[] {
-  const rng = seededRng("ob:" + name);
-  const out: Omit<Signal, "id" | "entityType" | "entityId" | "entityName" | "region">[] = [];
-  if (rng() > 0.5) {
-    const pick = OUTBOUND_TYPES[Math.floor(rng() * OUTBOUND_TYPES.length)];
-    const daysAgo = Math.floor(rng() * 90);
-    out.push({
-      type: pick.type,
-      title: `${name}：${pick.type}`,
-      summary: `${name} 近期出现「${pick.type}」相关动态，源自公开网络信息聚合。`,
-      url: `https://example.com/news/${Math.floor(rng() * 99999)}`,
-      source: "全网聚合(演示)",
-      date: new Date(Date.now() - daysAgo * 86400000).toISOString().slice(0, 10),
-      sentiment: pick.sentiment,
-      businessRelevance: pick.relevance,
-    });
-  }
-  return out;
-}
-
 async function scanEntity(type: EntityType, id: string, name: string, region?: string) {
-  if (searchMode() === "live") {
-    const results: SearchResult[] = await webSearch(`"${name}" meat processing expansion OR hiring OR investment OR acquisition`);
-    for (const r of results) {
-      const m = classify(r.title + " " + r.snippet);
-      if (!m) continue;
-      if (exists(type, id, `${name}：${m.type}`)) continue;
-      addSignal({
-        id: rid(), entityType: type, entityId: id, entityName: name,
-        type: m.type, title: `${name}：${m.type}`, summary: r.snippet || r.title,
-        url: r.url, source: "全网搜索", date: r.date || new Date().toISOString().slice(0, 10),
-        sentiment: m.sentiment, businessRelevance: m.relevance, region: region as any,
-      });
+  // 始终发起真实联网搜索（无 key 时自动走 DuckDuckGo 真实搜索；失败才回退合成）
+  const results: SearchResult[] = await webSearch(
+    `"${name}" meat processing OR poultry OR pork OR beef expansion OR hiring OR investment OR acquisition OR automation OR plant`
+  );
+  let added = 0;
+  const firstWord = name.toLowerCase().split(/\s+/)[0];
+  for (const r of results) {
+    if (added >= 3) break; // 每实体最多 3 条真实信号，避免噪声
+    const text = (r.title + " " + r.snippet).toLowerCase();
+    let pick = classify(text);
+    if (!pick) {
+      // 真实结果未命中关键词，但提及该公司（或明显业务词）→ 记为「全网动态」供人工研判
+      const biz = /expansion|hire|hiring|recruit|invest|acqui|automation|plant|production|certif|recall|layoff|new line|capacity|financ/i;
+      if (text.includes(firstWord) || biz.test(text)) {
+        pick = { type: "全网动态", sentiment: "neutral", relevance: "公开网络出现与该公司相关的动态，建议人工研判是否利于拓业。", kw: /./ };
+      } else {
+        continue;
+      }
     }
-  } else {
-    for (const s of syntheticSignalsFor(name, region)) {
-      if (exists(type, id, s.title)) continue;
-      addSignal({ id: rid(), entityType: type, entityId: id, entityName: name, region: region as any, ...s });
-    }
+    const title = `${name}：${pick.type}`;
+    if (exists(type, id, title)) continue;
+    addSignal({
+      id: rid(), entityType: type, entityId: id, entityName: name,
+      type: pick.type, title, summary: r.snippet || r.title,
+      url: r.url, source: r.source || liveEngineLabel(), date: r.date || new Date().toISOString().slice(0, 10),
+      sentiment: pick.sentiment, businessRelevance: pick.relevance, region: region as any,
+    });
+    added++;
   }
 }
 
 export async function runOutboundScan(
   entityType?: EntityType,
   entityId?: string,
-  limit = 200
+  limit = 60
 ): Promise<{ run: MonitorRun; signals: number }> {
   const started = new Date().toISOString();
   const run: MonitorRun = {
     id: rid(), direction: "outbound",
-    source: searchMode() === "live" ? "Web Search(Live)" : "合成全网数据(演示)",
+    source: liveEngineLabel(),
     startedAt: started, status: "running", scanned: 0, found: 0, newSignals: 0, newDiscovered: 0,
   };
   addRun(run);
@@ -240,9 +234,14 @@ export async function runOutboundScan(
       : e.discovered.find((c) => c.id === entityId);
     if (ent) targets.push({ type: entityType, id: entityId, name: (ent as any).company || (ent as any).name, region: (ent as any).region });
   } else {
-    const scope = entityType ? [entityType] : (["customer", "channel", "si"] as EntityType[]);
+    const scope = entityType ? [entityType] : (["customer", "channel", "si", "discovered"] as EntityType[]);
     for (const t of scope) {
-      const list = t === "customer" ? db.customers : t === "channel" ? db.channels : db.sis;
+      const list =
+        t === "customer" ? db.customers
+        : t === "channel" ? db.channels
+        : t === "si" ? db.sis
+        : t === "discovered" ? db.discovered
+        : [];
       for (const x of list as any[]) targets.push({ type: t, id: x.id, name: x.company || x.name, region: x.region });
     }
   }
@@ -262,6 +261,8 @@ export async function runOutboundScan(
       if (obj && "monitoredAt" in obj) (obj as any).monitoredAt = new Date().toISOString().slice(0, 10);
     }
     run.scanned++;
+    // 真实联网模式下礼貌节流，降低被限流风险
+    if (searchMode() === "live") await new Promise((r) => setTimeout(r, 80));
   }
 
   run.found = added;
@@ -272,8 +273,8 @@ export async function runOutboundScan(
 }
 
 // 双向一起跑
-export async function runBoth(): Promise<{ inbound: MonitorRun; outbound: MonitorRun }> {
+export async function runBoth(limit = 60): Promise<{ inbound: MonitorRun; outbound: MonitorRun }> {
   const inbound = await runInboundScan();
-  const outbound = await runOutboundScan();
+  const outbound = await runOutboundScan(undefined, undefined, limit);
   return { inbound: inbound.run, outbound: outbound.run };
 }

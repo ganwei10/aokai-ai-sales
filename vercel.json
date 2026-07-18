@@ -5,7 +5,7 @@
   "installCommand": "npm install",
   "crons": [
     {
-      "path": "/api/recruitment/scan",
+      "path": "/api/monitor/run",
       "schedule": "7 6 * * *"
     }
   ]

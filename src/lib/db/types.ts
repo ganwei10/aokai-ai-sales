@@ -83,16 +83,16 @@ export interface SystemIntegrator {
 }
 
 // ---------- 待评估公司（招聘监控入站发现，尚未分类）----------
-export type DiscoveredStatus = "new" | "qualifying" | "converted" | "rejected";
+export type DiscoveredStatus = "new" | "qualifying" | "converted" | "rejected" | "watch";
 export interface DiscoveredCompany {
   id: string;
   company: string;
   city: string | null;
   province: string | null;
   region: Region | null;
-  source: "recruitment"; // 发现来源
+  source: "recruitment" | "manual"; // 发现来源
   discoveredAt: string;
-  query: string; // 发现时的搜索词 / 职位
+  query: string | null; // 发现时的搜索词 / 职位（手动添加为 null）
   snippet: string; // 摘要
   employees: number | null;
   segment: Segment | null;
@@ -112,6 +112,7 @@ export type SignalType =
   | "认证/合规"
   | "奖项/新闻"
   | "负面事件"
+  | "全网动态" // 真实搜索中未命中具体关键词、但提及该公司的动态，供人工研判
   | "招聘缺工"; // 来自入站招聘发现
 
 export type SignalSentiment = "positive" | "neutral" | "negative";

@@ -1,5 +1,10 @@
-// 搜索抽象层：真实联网搜索（配 key 即用）+ 合成回退（无 key 也能演示）
-// 真实来源：Brave Search / SerpAPI / Tavily（由 WEB_SEARCH_ENGINE 选择）
+// 搜索抽象层：真实联网搜索 + 合成回退（无 key 也能演示）
+//
+// 真实来源（按 WEB_SEARCH_ENGINE 选择主引擎）：
+//   - duckduckgo : 免 key 真实搜索（默认）。HTML 抓取为主，自动回退 DDG 速答 / Wikipedia
+//   - brave      : Brave Search API（需 WEB_SEARCH_API_KEY）
+//   - serp       : SerpAPI（需 WEB_SEARCH_API_KEY）
+//   - tavily     : Tavily（需 WEB_SEARCH_API_KEY）
 // 招聘来源：Adzuna（ADZUNA_APP_ID / ADZUNA_APP_KEY）或合成
 
 export interface SearchResult {
@@ -7,6 +12,7 @@ export interface SearchResult {
   snippet: string;
   url: string;
   date?: string;
+  source?: string; // 真实来源标记，用于信号溯源
 }
 
 export interface JobPosting {
@@ -35,38 +41,154 @@ function seededRng(seed: number) {
   };
 }
 
-const ENGINE = (process.env.WEB_SEARCH_ENGINE || "brave").toLowerCase();
 const KEY = process.env.WEB_SEARCH_API_KEY || "";
 const ADZUNA_ID = process.env.ADZUNA_APP_ID || "";
 const ADZUNA_KEY = process.env.ADZUNA_APP_KEY || "";
+// 无 key 时默认走 duckduckgo（真实联网，免 key）；有 key 时默认走 brave
+const ENGINE = (process.env.WEB_SEARCH_ENGINE || (KEY ? "brave" : "duckduckgo")).toLowerCase();
 
+// live = 会真正发起联网请求；demo = 仅合成数据
 export function searchMode(): "live" | "demo" {
-  return KEY ? "live" : "demo";
+  return ENGINE === "duckduckgo" || KEY ? "live" : "demo";
+}
+export function liveEngineLabel(): string {
+  if (ENGINE === "duckduckgo") return "DuckDuckGo(Live)";
+  if (ENGINE === "serp") return "SerpAPI(Live)";
+  if (ENGINE === "tavily") return "Tavily(Live)";
+  return "Brave(Live)";
 }
 
-// ---------- 全网搜索 ----------
+// 从查询串中提取公司名（取首对引号内文本，否则取前 3 个词）
+function extractName(query: string): string {
+  const m = query.match(/"([^"]+)"/);
+  if (m) return m[1];
+  return query.replace(/OR|meat processing|poultry|pork|beef|expansion|hiring|investment|acquisition|automation|plant/gi, " ").trim().split(/\s+/).slice(0, 3).join(" ");
+}
+
+// ---------- 全网搜索（真实优先，多级回退）----------
 export async function webSearch(query: string): Promise<SearchResult[]> {
-  if (!KEY) return syntheticWeb(query);
+  const name = extractName(query);
   try {
-    if (ENGINE === "serp") return await serp(query);
-    if (ENGINE === "tavily") return await tavily(query);
-    return await brave(query);
+    if (ENGINE !== "duckduckgo" && KEY) {
+      if (ENGINE === "serp") return await serp(query);
+      if (ENGINE === "tavily") return await tavily(query);
+      return await brave(query);
+    }
+    // duckduckgo（默认）：HTML 抓取 → 速答 API → Wikipedia，逐级回退
+    const html = await duckduckgo(query);
+    if (html.length) return html;
+    const ia = await ddgInstantAnswer(name);
+    if (ia.length) return ia;
+    const wk = await wikipedia(name);
+    if (wk.length) return wk;
+    return html; // 空数组，交由调用方回退合成
   } catch (e) {
+    try {
+      const wk = await wikipedia(name);
+      if (wk.length) return wk;
+    } catch {}
     return syntheticWeb(query);
   }
+}
+
+async function duckduckgo(query: string): Promise<SearchResult[]> {
+  const url = "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
+  const r = await fetch(url, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+      Accept: "text/html",
+    },
+  });
+  const html = await r.text();
+  if (/anomaly|unusual traffic|verify you are human/i.test(html)) return [];
+  const results: SearchResult[] = [];
+  const blockRe =
+    /class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?class="result__snippet"[^>]*href="[^"]*"[^>]*>([\s\S]*?)<\/a>/g;
+  let m: RegExpExecArray | null;
+  while ((m = blockRe.exec(html)) !== null && results.length < 8) {
+    const rawHref = m[1];
+    const title = decodeEntities(stripTags(m[2])).trim();
+    const snippet = decodeEntities(stripTags(m[3])).trim();
+    const real = extractUddg(rawHref);
+    if (real && title) results.push({ title, snippet, url: real, source: "DuckDuckGo(HTML)" });
+  }
+  return results;
+}
+
+// DuckDuckGo 官方速答 API（免 key，返回实体摘要 + 相关词条真实链接）
+async function ddgInstantAnswer(name: string): Promise<SearchResult[]> {
+  const url = "https://api.duckduckgo.com/?q=" + encodeURIComponent(name) + "&format=json&no_html=1";
+  const r = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+  const j = await r.json();
+  const out: SearchResult[] = [];
+  if (j.Abstract && j.AbstractURL) {
+    out.push({ title: j.Heading || name, snippet: j.Abstract, url: j.AbstractURL, source: "DuckDuckGo(IA)" });
+  }
+  for (const t of j.RelatedTopics || []) {
+    if (t.FirstURL && t.Text) out.push({ title: t.Text.slice(0, 80), snippet: t.Text, url: t.FirstURL, source: "DuckDuckGo(IA)" });
+  }
+  return out.slice(0, 6);
+}
+
+// Wikipedia 搜索 API（真实、免 key、稳定）
+async function wikipedia(name: string): Promise<SearchResult[]> {
+  const url =
+    "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=" +
+    encodeURIComponent(name + " meat") +
+    "&srlimit=5&format=json";
+  const r = await fetch(url, { headers: { "User-Agent": "aokai-sales/1.0 (market-research)" } });
+  const j = await r.json();
+  const out: SearchResult[] = [];
+  for (const x of j.query?.search || []) {
+    const title = x.title as string;
+    out.push({
+      title,
+      snippet: decodeEntities(stripTags(x.snippet || "")),
+      url: "https://en.wikipedia.org/wiki/" + title.replace(/ /g, "_"),
+      source: "Wikipedia",
+    });
+  }
+  return out;
+}
+
+function extractUddg(href: string): string {
+  const i = href.indexOf("uddg=");
+  if (i < 0) return "";
+  let s = href.slice(i + 5);
+  const amp = s.indexOf("&");
+  if (amp >= 0) s = s.slice(0, amp);
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+function stripTags(s: string): string {
+  return s.replace(/<[^>]+>/g, " ");
+}
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ");
 }
 
 async function brave(query: string): Promise<SearchResult[]> {
   const url = "https://api.search.brave.com/res/v1/web/search?count=8&q=" + encodeURIComponent(query);
   const r = await fetch(url, { headers: { Accept: "application/json", "X-Subscription-Token": KEY } });
   const j = await r.json();
-  return (j.web?.results || []).map((x: any) => ({ title: x.title, snippet: x.description || "", url: x.url, date: x.page_age || x.age }));
+  return (j.web?.results || []).map((x: any) => ({ title: x.title, snippet: x.description || "", url: x.url, date: x.page_age || x.age, source: "Brave" }));
 }
 async function serp(query: string): Promise<SearchResult[]> {
   const url = "https://serpapi.com/search.json?engine=google&num=8&q=" + encodeURIComponent(query) + "&api_key=" + KEY;
   const r = await fetch(url);
   const j = await r.json();
-  return (j.organic_results || []).map((x: any) => ({ title: x.title, snippet: x.snippet || "", url: x.link, date: x.date }));
+  return (j.organic_results || []).map((x: any) => ({ title: x.title, snippet: x.snippet || "", url: x.link, date: x.date, source: "SerpAPI" }));
 }
 async function tavily(query: string): Promise<SearchResult[]> {
   const r = await fetch("https://api.tavily.com/search", {
@@ -75,10 +197,10 @@ async function tavily(query: string): Promise<SearchResult[]> {
     body: JSON.stringify({ api_key: KEY, query, max_results: 8 }),
   });
   const j = await r.json();
-  return (j.results || []).map((x: any) => ({ title: x.title, snippet: x.content || "", url: x.url, date: x.published_date }));
+  return (j.results || []).map((x: any) => ({ title: x.title, snippet: x.content || "", url: x.url, date: x.published_date, source: "Tavily" }));
 }
 
-// 合成搜索结果（演示，按 query 确定性生成）
+// 合成搜索结果（演示 / 真实全部失败时的兜底）
 function syntheticWeb(query: string): SearchResult[] {
   const rng = seededRng(hash(query));
   const q = query.replace(/"/g, "");
@@ -103,6 +225,7 @@ function syntheticWeb(query: string): SearchResult[] {
       snippet: q + " " + t + ". The move is seen as part of a broader expansion in the North American protein sector.",
       url: "https://example.com/news/" + (hash(query + i) % 99999),
       date: d,
+      source: "合成(演示)",
     });
   }
   return out;
@@ -136,7 +259,6 @@ async function adzuna(query: string): Promise<JobPosting[]> {
   }));
 }
 
-// 合成招聘职位（演示）：返回若干肉企职位，公司名部分与库内重叠、部分为新公司
 const SYNTH_COMPANIES = [
   "MapleLeaf Proteins", "Cargill Foods", "Sofina Poultry", "Olymel Packers", "Burnbrae Farms",
   "Schneider Foods", "Conestoga Meats", "HyLife Pork", "DairyWorld Co", "Exceldor Cooperative",
@@ -157,8 +279,8 @@ function syntheticJobs(query: string): JobPosting[] {
     const company = SYNTH_COMPANIES[Math.floor(rng() * SYNTH_COMPANIES.length)];
     const title = titles[Math.floor(rng() * titles.length)];
     out.push({
-      company: company,
-      title: title,
+      company,
+      title,
       location: rng() < 0.5 ? "Ontario, CA" : "Midwest, US",
       snippet: company + " is hiring a " + title + ". Growing production volume; multiple shifts available.",
       url: "https://example.com/jobs/" + (hash(company + i) % 99999),

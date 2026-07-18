@@ -21,6 +21,9 @@ export default function MonitorPage() {
   const [signals, setSignals] = useState<Signal[]>([]);
   const [busy, setBusy] = useState<"" | "inbound" | "outbound" | "both">("");
   const [filter, setFilter] = useState({ entityType: "", type: "", sentiment: "" });
+  const [watchName, setWatchName] = useState("");
+  const [watchRegion, setWatchRegion] = useState("安省");
+  const [watchMsg, setWatchMsg] = useState("");
 
   const load = useCallback(async () => {
     const [s, r, sig] = await Promise.all([
@@ -43,6 +46,24 @@ export default function MonitorPage() {
       setBusy("");
       await load();
     }
+  }
+
+  async function addWatch() {
+    const name = watchName.trim();
+    if (!name) return;
+    setWatchMsg("添加中…");
+    const res = await fetch("/api/monitor/discovered", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ company: name, region: watchRegion }),
+    });
+    if (res.ok) {
+      setWatchMsg(`已加入监测：${name}（运行「方向B」即拉取其真实全网信号）`);
+      setWatchName("");
+    } else {
+      setWatchMsg("添加失败：公司名不能为空");
+    }
+    await load();
   }
 
   const lastIn = runs.find((r) => r.direction === "inbound");
@@ -84,6 +105,29 @@ export default function MonitorPage() {
           <div className="mt-1 text-xs text-slate-400">入站 + 出站 一次跑完</div>
           <div className="mt-3 text-xs text-brand">{busy === "both" ? "运行中…" : "推荐：先跑这一下"}</div>
         </button>
+      </div>
+
+      {/* 添加真实监测公司（手动入池，出站扫描拉取真实信号）*/}
+      <div className="card p-3">
+        <div className="mb-2 text-xs font-semibold uppercase text-slate-400">添加真实监测公司（手动入池）</div>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            className="input flex-1 min-w-[200px]"
+            placeholder="输入真实公司名，如 Maple Leaf Foods / Olymel / 双汇 / 雨润"
+            value={watchName}
+            onChange={(e) => setWatchName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addWatch()}
+          />
+          <select className="input w-28" value={watchRegion} onChange={(e) => setWatchRegion(e.target.value)}>
+            <option value="安省">安省</option>
+            <option value="美中">美中</option>
+          </select>
+          <button onClick={addWatch} className="rounded-lg bg-brand px-3 py-2 text-sm font-semibold text-white transition hover:opacity-90">
+            加入监测
+          </button>
+        </div>
+        {watchMsg && <div className="mt-2 text-xs text-slate-500">{watchMsg}</div>}
+        <div className="mt-1 text-[11px] text-slate-400">真实公司名才会返回真实信号；种子库为演示用的合成公司名，出站扫描对它们返回 0 属正常。</div>
       </div>
 
       {/* 运行记录 */}
