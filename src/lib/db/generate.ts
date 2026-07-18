@@ -1,22 +1,24 @@
-// 第二阶段数据库生成器（确定性，可复现）
-// 目标：300 家客户（安省 60% = 180 / 美中 40% = 120）+ 100 家渠道商
-// 中小型企业（Tier2/3）切入，含招聘缺工信号，便于与第四阶段自动化联动。
+// 第二阶段数据库生成器（重构版，确定性可复现）
+// 规模：300 客户（安省 180 / 美中 120）+ 70 渠道商（安省 42 / 美中 28）
+//      + 30 SI（安省 18 / 美中 12）。三类实体彻底分离。
 
 import type {
   Automation,
+  ChannelPartner,
+  ChannelType,
   Customer,
   CustStatus,
-  Partner,
-  PartnerSpecialty,
-  PartnerType,
-  ProductInterest,
+  DiscoveredCompany,
   Region,
   Segment,
   Signal,
+  SystemIntegrator,
+  SIType,
+  ProductInterest,
+  RecSignal,
   Tier,
 } from "./types";
 
-// 确定性 PRNG（mulberry32），固定种子保证每次生成结果一致
 function mulberry32(seed: number) {
   return function () {
     seed |= 0;
@@ -64,41 +66,49 @@ const PAIN = [
   "前道分割与后道装袋节拍不匹配，在制品堆积",
 ];
 const DM_TITLE = ["Plant Manager", "Production Manager", "Operations Manager", "VP Manufacturing"];
-const PARTNER_PRE = ["Maple", "Grand River", "Bluewater", "Ironhorse", "Polar", "Summit", "Keystone", "Lakeside", "Prairie", "Northern", "Great Lakes", "Frontier", "Cascade", "Evergreen", "StClair", "Thunder", "Georgian", "Niagara", "Huron", "Erie"];
-const PARTNER_SUF = ["Automation", "Integration", "Systems", "Machinery", "Solutions", "Robotics", "Engineered"];
+const CH_PRE = ["Maple", "Grand River", "Bluewater", "Ironhorse", "Polar", "Summit", "Keystone", "Lakeside", "Prairie", "Northern", "Great Lakes", "Frontier", "Cascade", "Evergreen", "StClair", "Thunder", "Georgian", "Niagara", "Huron", "Erie"];
+const CH_SUF = ["Trading", "Distribution", "Supply", "Machinery", "Agency", "Import"];
+const SI_PRE = ["Precision", "Integra", "Apex", "Vector", "Cornerstone", "Meridian", "Tensor", "Helix", "Cobalt", "Atlas", "Veridian", "Quanta", "Lumen", "Forge", "Nexus", "Pinnacle"];
+const SI_SUF = ["Automation", "Integration", "Robotics", "Systems", "Engineered", "Controls"];
 
 function slugify(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 14);
 }
 
-export function generateDatabase(): { customers: Customer[]; partners: Partner[] } {
+export interface DbBundle {
+  customers: Customer[];
+  channels: ChannelPartner[];
+  sis: SystemIntegrator[];
+  discovered: DiscoveredCompany[];
+  signals: Signal[];
+}
+
+export function generateDatabase(): DbBundle {
   const rng = mulberry32(20270718);
   const pick = <T>(arr: T[]): T => arr[Math.floor(rng() * arr.length)];
   const randInt = (a: number, b: number) => a + Math.floor(rng() * (b - a + 1));
   const chance = (p: number) => rng() < p;
 
-  // ---- 渠道商（100 家：安省 60 / 美中 40）----
-  const partners: Partner[] = [];
-  const ON_PARTNERS = 60;
-  for (let i = 0; i < ON_PARTNERS + 40; i++) {
-    const isOn = i < ON_PARTNERS;
+  // ---- 渠道商（70：安省 42 / 美中 28）----
+  const channels: ChannelPartner[] = [];
+  const ON_CH = 42;
+  for (let i = 0; i < ON_CH + 28; i++) {
+    const isOn = i < ON_CH;
     const region: Region = isOn ? "安省" : "美中";
     const loc = isOn ? pick(ON_CITIES) : pick(US_CITIES);
     const city = isOn ? (loc as string) : (loc as { city: string }).city;
     const province = isOn ? "ON" : (loc as { prov: string }).prov;
-    const type = pick<PartnerType>(["集成商", "经销商", "行业顾问"]);
-    const specialty = pick<PartnerSpecialty>(["后道装袋", "前道分割", "整线集成", "合规咨询"]);
-    const name = `${pick(PARTNER_PRE)} ${pick(PARTNER_SUF)}`;
+    const type: ChannelType = pick<ChannelType>(["经销商", "代理商"]);
+    const name = `${pick(CH_PRE)} ${pick(CH_SUF)}`;
     const contact = `${pick(FIRST)} ${pick(SURNAMES)}`;
     const slug = slugify(name);
-    partners.push({
-      id: `P-${String(i + 1).padStart(3, "0")}`,
+    channels.push({
+      id: `CH-${String(i + 1).padStart(3, "0")}`,
       name,
       city,
       province,
       region,
       type,
-      specialty,
       coverageKm: isOn ? randInt(80, 220) : randInt(120, 350),
       tierFocus: pick<"SME" | "大型" | "全">(["SME", "SME", "全", "大型"]),
       contact,
@@ -110,10 +120,43 @@ export function generateDatabase(): { customers: Customer[]; partners: Partner[]
     });
   }
 
-  const onPartners = partners.filter((p) => p.region === "安省");
-  const usPartners = partners.filter((p) => p.region === "美中");
+  // ---- SI 系统集成商（30：安省 18 / 美中 12）----
+  const sis: SystemIntegrator[] = [];
+  const ON_SI = 18;
+  for (let i = 0; i < ON_SI + 12; i++) {
+    const isOn = i < ON_SI;
+    const region: Region = isOn ? "安省" : "美中";
+    const loc = isOn ? pick(ON_CITIES) : pick(US_CITIES);
+    const city = isOn ? (loc as string) : (loc as { city: string }).city;
+    const province = isOn ? "ON" : (loc as { prov: string }).prov;
+    const type: SIType = pick<SIType>(["整线集成", "后道集成", "前道集成", "视觉检测"]);
+    const name = `${pick(SI_PRE)} ${pick(SI_SUF)}`;
+    const contact = `${pick(FIRST)} ${pick(SURNAMES)}`;
+    const slug = slugify(name);
+    sis.push({
+      id: `SI-${String(i + 1).padStart(3, "0")}`,
+      name,
+      city,
+      province,
+      region,
+      type,
+      coverageKm: isOn ? randInt(80, 200) : randInt(120, 320),
+      tierFocus: pick<"SME" | "大型" | "全">(["SME", "SME", "全", "大型"]),
+      contact,
+      email: `${contact.split(" ")[0].toLowerCase()}.${contact.split(" ")[1].toLowerCase()}@${slug}.ca`,
+      commissionRate: 0.3,
+      activeAccounts: randInt(2, 18),
+      pipelineValueCad: randInt(3, 26) * 100000,
+      status: chance(0.8) ? "active" : "pending",
+    });
+  }
 
-  // ---- 客户（300 家：安省 180 / 美中 120）----
+  const onChannels = channels.filter((p) => p.region === "安省");
+  const usChannels = channels.filter((p) => p.region === "美中");
+  const onSi = sis.filter((p) => p.region === "安省");
+  const usSi = sis.filter((p) => p.region === "美中");
+
+  // ---- 客户（300：安省 180 / 美中 120）----
   const customers: Customer[] = [];
   for (let i = 0; i < 300; i++) {
     const isOn = i < 180;
@@ -123,11 +166,11 @@ export function generateDatabase(): { customers: Customer[]; partners: Partner[]
     const province = isOn ? "ON" : (loc as { prov: string }).prov;
 
     const tier: Tier = chance(0.3) ? "Tier2" : "Tier3";
-    const segment = pick<Segment>(["禽肉", "猪牛肉", "熟食/调理", "海鲜", "综合"]);
+    const segment: Segment = pick<Segment>(["禽肉", "猪牛肉", "熟食/调理", "海鲜", "综合"]);
     const employees = randInt(45, 520);
     const revenueCad = Math.round((employees * randInt(110, 260)) / 1000) * 1000;
 
-    const productInterest = pick<ProductInterest>(["AK201000", "AK201000", "AK0200", "AK0200", "整线", "其他"]);
+    const productInterest: ProductInterest = pick<ProductInterest>(["AK201000", "AK201000", "AK0200", "AK0200", "整线", "其他"]);
     const painPoint = pick(PAIN);
 
     const dmFirst = pick(FIRST);
@@ -138,14 +181,16 @@ export function generateDatabase(): { customers: Customer[]; partners: Partner[]
     const email = `${dmFirst.toLowerCase()}.${dmLast.toLowerCase()}@${slug}.${isOn ? "ca" : "com"}`;
 
     const openRoles = randInt(0, 16);
-    const recruitmentSignal: Signal = openRoles >= 8 ? "red" : openRoles >= 4 ? "yellow" : "green";
+    const recruitmentSignal: RecSignal = openRoles >= 8 ? "red" : openRoles >= 4 ? "yellow" : "green";
     const automationLevel: Automation = chance(0.55) ? "low" : chance(0.6) ? "med" : "high";
 
     const base = productInterest === "AK201000" ? 220000 : productInterest === "AK0200" ? 140000 : productInterest === "整线" ? 480000 : 90000;
     const estDealCad = Math.round((base + employees * 120) / 10000) * 10000;
 
-    const pool = isOn ? onPartners : usPartners;
-    const partner = pool[i % pool.length];
+    const chPool = isOn ? onChannels : usChannels;
+    const siPool = isOn ? onSi : usSi;
+    const channel = chPool[i % chPool.length];
+    const si = siPool[i % siPool.length];
 
     const statusPool: CustStatus[] = ["prospect", "prospect", "prospect", "contacted", "contacted", "replied", "visit", "won"];
     const status = pick(statusPool);
@@ -170,11 +215,12 @@ export function generateDatabase(): { customers: Customer[]; partners: Partner[]
       openPackagingRoles: openRoles,
       automationLevel,
       estDealCad,
-      partnerId: partner.id,
+      channelId: channel.id,
+      siId: si.id,
       status,
       lastActivity,
     });
   }
 
-  return { customers, partners };
+  return { customers, channels, sis, discovered: [], signals: [] };
 }
